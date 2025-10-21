@@ -49,23 +49,7 @@ async function fetchCandles(days = 7) {
   }
 }
 
-// --- FETCH 24H STATS ---
-async function fetch24hStats() {
-  try {
-    const url =
-      "https://api.coingecko.com/api/v3/coins/bitcoin?localization=false&tickers=false&market_data=true";
-    const res = await fetch(url);
-    const data = await res.json();
 
-    const high24h = data.market_data.high_24h.usd;
-    const low24h = data.market_data.low_24h.usd;
-
-    return { high24h, low24h };
-  } catch (err) {
-    console.error("Fetch 24h stats failed:", err.message);
-    return { high24h: 0, low24h: 0 };
-  }
-}
 
 // --- INDICATORS ---
 function calculateIndicators(closes) {
