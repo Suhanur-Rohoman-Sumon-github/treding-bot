@@ -31,8 +31,6 @@ async function fetchCandles(days = 7) {
     const res = await fetch(url);
     const data = await res.json();
 
-    
-
     if (!data.prices || data.prices.length === 0) {
       console.error("Error fetching candles:", data);
       return [];
@@ -76,6 +74,25 @@ function calculateIndicators(closes) {
   const emaLong = EMA.calculate({ period: 20, values: closes });
   const rsi = RSI.calculate({ period: 14, values: closes });
   return { emaShort, emaLong, rsi };
+}
+
+async function fetch24hStats() {
+  try {
+    const url =
+      "https://api.coingecko.com/api/v3/coins/bitcoin?localization=false&tickers=false&market_data=true";
+    const res = await fetch(url);
+    const data = await res.json();
+
+    const high24h = data.market_data.high_24h.usd;
+    const low24h = data.market_data.low_24h.usd;
+    const current = data.market_data.current_price.usd;
+    const priceChange24h = data.market_data.price_change_percentage_24h;
+    console.log(high24h, low24h, current, priceChange24h);
+    return { high24h, low24h, current, priceChange24h };
+  } catch (err) {
+    console.error("Fetch 24h stats failed:", err.message);
+    return { high24h: 0, low24h: 0, current: 0, priceChange24h: 0 };
+  }
 }
 
 // --- POSITION SIZE ---
