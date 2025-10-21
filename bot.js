@@ -4,7 +4,7 @@ import { Telegraf } from "telegraf";
 
 // --- CONFIG ---
 const BOT_TOKEN = "8469977295:AAHZWhpCEzjOa2oO01snLZA7pJ5962dOS8A";
-const CHAT_ID = 6960930765;
+const CHAT_ID = 6960930765; // your chat ID
 
 const CAPITAL = 300;
 const RISK_PERCENT = 1.5;
@@ -17,32 +17,33 @@ let position = null;
 // --- BOT CONNECT ---
 (async () => {
   try {
-    await bot.telegram.sendMessage(CHAT_ID, "✅ Connected!");
-    console.log("Message sent successfully!");
+    await bot.telegram.sendMessage(CHAT_ID, "✅ Connected to CoinGecko feed!");
+    console.log("Bot connected and running...");
   } catch (err) {
     console.error("Send error:", err.description || err.message);
   }
 })();
 
-// --- FETCH CANDLES ---
-async function fetchCandles(symbol = "BTCUSDT", interval = "15m", limit = 300) {
+// --- FETCH HOURLY CANDLES FROM COINGECKO ---
+async function fetchCandles(days = 7) {
   try {
-    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+    const url = `https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}`;
     const res = await fetch(url);
     const data = await res.json();
 
-    if (!Array.isArray(data)) {
+    
+
+    if (!data.prices || data.prices.length === 0) {
       console.error("Error fetching candles:", data);
       return [];
     }
 
-    return data.map((c) => ({
-      time: new Date(c[0]),
-      open: parseFloat(c[1]),
-      high: parseFloat(c[2]),
-      low: parseFloat(c[3]),
-      close: parseFloat(c[4]),
-      volume: parseFloat(c[5]),
+    return data.prices.map((p) => ({
+      time: new Date(p[0]),
+      open: p[1],
+      high: p[1],
+      low: p[1],
+      close: p[1],
     }));
   } catch (err) {
     console.error("Fetch candles failed:", err.message);
@@ -51,21 +52,17 @@ async function fetchCandles(symbol = "BTCUSDT", interval = "15m", limit = 300) {
 }
 
 // --- FETCH 24H STATS ---
-async function fetch24hStats(symbol = "BTCUSDT") {
+async function fetch24hStats() {
   try {
-    const url = `https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`;
+    const url =
+      "https://api.coingecko.com/api/v3/coins/bitcoin?localization=false&tickers=false&market_data=true";
     const res = await fetch(url);
     const data = await res.json();
 
-    if (!data || data.code) {
-      console.error("Error fetching 24h stats:", data);
-      return { high24h: 0, low24h: 0 };
-    }
+    const high24h = data.market_data.high_24h.usd;
+    const low24h = data.market_data.low_24h.usd;
 
-    return {
-      high24h: parseFloat(data.highPrice),
-      low24h: parseFloat(data.lowPrice),
-    };
+    return { high24h, low24h };
   } catch (err) {
     console.error("Fetch 24h stats failed:", err.message);
     return { high24h: 0, low24h: 0 };
@@ -74,10 +71,11 @@ async function fetch24hStats(symbol = "BTCUSDT") {
 
 // --- INDICATORS ---
 function calculateIndicators(closes) {
-  const ema50 = EMA.calculate({ period: 50, values: closes });
-  const ema200 = EMA.calculate({ period: 200, values: closes });
+  // Shortened periods for more frequent signals
+  const emaShort = EMA.calculate({ period: 10, values: closes });
+  const emaLong = EMA.calculate({ period: 20, values: closes });
   const rsi = RSI.calculate({ period: 14, values: closes });
-  return { ema50, ema200, rsi };
+  return { emaShort, emaLong, rsi };
 }
 
 // --- POSITION SIZE ---
@@ -88,11 +86,7 @@ function calculatePositionSize(entryPrice) {
   const positionSize = riskAmount / riskPerUnit;
   const takeProfitPrice = entryPrice + riskPerUnit * REWARD_RISK_RATIO;
 
-  return {
-    positionSize,
-    stopLossPrice,
-    takeProfitPrice,
-  };
+  return { positionSize, stopLossPrice, takeProfitPrice };
 }
 
 // --- SEND TELEGRAM MESSAGE ---
@@ -107,26 +101,34 @@ async function sendTelegramMessage(msg) {
 
 // --- MAIN ANALYZE FUNCTION ---
 async function analyze() {
+  console.log("Analyzing market data...");
+
   const candles = await fetchCandles();
+  console.log("Fetched candles:", candles.length);
+
   if (candles.length === 0) {
     console.log("No candle data, skipping analyze...");
     return;
   }
 
   const closes = candles.map((c) => c.close);
-  if (closes.length < 200) return;
+  if (closes.length < 20) {
+    console.log("Not enough data for indicators.");
+    return;
+  }
 
-  const { ema50, ema200, rsi } = calculateIndicators(closes);
+  const { emaShort, emaLong, rsi } = calculateIndicators(closes);
   const current = closes[closes.length - 1];
-  const ema50Now = ema50[ema50.length - 1];
-  const ema200Now = ema200[ema200.length - 1];
+  const emaShortNow = emaShort[emaShort.length - 1];
+  const emaLongNow = emaLong[emaLong.length - 1];
   const rsiNow = rsi[rsi.length - 1];
 
   const { high24h, low24h } = await fetch24hStats();
-  const uptrend = ema50Now > ema200Now;
+
+  const uptrend = emaShortNow > emaLongNow;
 
   if (!position) {
-    if (uptrend && rsiNow < 70 && current > ema50Now) {
+    if (uptrend && rsiNow < 70 && current > emaShortNow) {
       const { positionSize, stopLossPrice, takeProfitPrice } =
         calculatePositionSize(current);
       position = {
@@ -137,6 +139,7 @@ async function analyze() {
       };
       const msg = `🚀 BUY SIGNAL
 Price: $${current.toFixed(2)}
+RSI: ${rsiNow.toFixed(2)}
 24h High: $${high24h}
 24h Low: $${low24h}
 Position size: ${positionSize.toFixed(6)} BTC
@@ -145,9 +148,9 @@ Take Profit: $${takeProfitPrice.toFixed(2)}`;
       await sendTelegramMessage(msg);
     } else {
       console.log(
-        `No buy signal. RSI: ${rsiNow.toFixed(2)} Price: ${current.toFixed(
+        `No buy signal. RSI: ${rsiNow.toFixed(2)} | Price: $${current.toFixed(
           2
-        )} 24h High: ${high24h} Low: ${low24h}`
+        )} | EMA10: ${emaShortNow.toFixed(2)} | EMA20: ${emaLongNow.toFixed(2)}`
       );
     }
   } else {
@@ -168,4 +171,4 @@ Take Profit: $${takeProfitPrice.toFixed(2)}`;
 
 // --- RUN BOT EVERY MINUTE ---
 setInterval(analyze, 60 * 1000);
-console.log("Bot started...");
+console.log("📈 Bot started using CoinGecko hourly API...");
