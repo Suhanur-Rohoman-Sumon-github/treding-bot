@@ -1,175 +1,189 @@
+import { Telegraf } from "telegraf";
 import fetch from "node-fetch";
 import { EMA, RSI } from "technicalindicators";
-import { Telegraf } from "telegraf";
 
-// --- CONFIG ---
 const BOT_TOKEN = "8469977295:AAHZWhpCEzjOa2oO01snLZA7pJ5962dOS8A";
-const CHAT_ID = 6960930765; // your chat ID
+const CHAT_ID = 6960930765;
+const API_KEY = "d6d3d69587d74a969c948d302fe214f2";
 
-const CAPITAL = 300;
-const RISK_PERCENT = 1.5;
-const STOP_LOSS_PERCENT = 0.5;
-const REWARD_RISK_RATIO = 3;
+const CAPITAL = 1000;
+const RISK_PERCENT = 2;
+const STOP_LOSS_PERCENT = 1;
+const TAKE_PROFIT_PERCENT = 2;
 
 const bot = new Telegraf(BOT_TOKEN);
-let position = null;
+let positions = {};
+let lastRSIValues = {};
+
+// Split pairs into two categories
+const cryptoSymbols = ["BTCUSDT", "ETHUSDT"];
+const goldSymbols = ["XAU/USD", "XAU/EUR", "XAU/GBP", "XAU/AUD"];
 
 // --- BOT CONNECT ---
 (async () => {
   try {
-    await bot.telegram.sendMessage(CHAT_ID, "✅ Connected to CoinGecko feed!");
-    console.log("Bot connected and running...");
+    await bot.telegram.sendMessage(CHAT_ID, "✅ Hybrid RSI Bot connected!");
+    console.log("Telegram bot connected.");
   } catch (err) {
-    console.error("Send error:", err.description || err.message);
+    console.error("Failed to connect Telegram bot:", err.message);
   }
 })();
 
-// --- FETCH HOURLY CANDLES FROM COINGECKO ---
-async function fetchCandles(days = 7) {
+// --- FETCH CANDLES FROM BINANCE ---
+async function fetchBinanceCandles(
+  symbol = "BTCUSDT",
+  interval = "15m",
+  limit = 300
+) {
   try {
-    const url = `https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}`;
+    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
     const res = await fetch(url);
     const data = await res.json();
-
-    if (!data.prices || data.prices.length === 0) {
-      console.error("Error fetching candles:", data);
-      return [];
-    }
-
-    return data.prices.map((p) => ({
-      time: new Date(p[0]),
-      open: p[1],
-      high: p[1],
-      low: p[1],
-      close: p[1],
+    if (!Array.isArray(data)) return [];
+    return data.map((c) => ({
+      time: new Date(c[0]),
+      close: parseFloat(c[4]),
     }));
   } catch (err) {
-    console.error("Fetch candles failed:", err.message);
+    console.error(`❌ Binance fetch failed for ${symbol}:`, err.message);
     return [];
   }
 }
 
-
+// --- FETCH CANDLES FROM TWELVE DATA ---
+async function fetchTwelveCandles(
+  symbol = "XAU/USD",
+  interval = "15min",
+  limit = 300
+) {
+  try {
+    const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval}&outputsize=${limit}&apikey=${API_KEY}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.values) {
+      console.error(
+        `❌ No data for ${symbol}:`,
+        data.message || "Unknown error"
+      );
+      return [];
+    }
+    return data.values.reverse().map((c) => ({
+      time: new Date(c.datetime),
+      close: parseFloat(c.close),
+    }));
+  } catch (err) {
+    console.error(`❌ Twelve Data fetch failed for ${symbol}:`, err.message);
+    return [];
+  }
+}
 
 // --- INDICATORS ---
 function calculateIndicators(closes) {
-  // Shortened periods for more frequent signals
-  const emaShort = EMA.calculate({ period: 10, values: closes });
-  const emaLong = EMA.calculate({ period: 20, values: closes });
+  const ema50 = EMA.calculate({ period: 50, values: closes });
+  const ema200 = EMA.calculate({ period: 200, values: closes });
   const rsi = RSI.calculate({ period: 14, values: closes });
-  return { emaShort, emaLong, rsi };
-}
-
-async function fetch24hStats() {
-  try {
-    const url =
-      "https://api.coingecko.com/api/v3/coins/bitcoin?localization=false&tickers=false&market_data=true";
-    const res = await fetch(url);
-    const data = await res.json();
-
-    const high24h = data.market_data.high_24h.usd;
-    const low24h = data.market_data.low_24h.usd;
-    const current = data.market_data.current_price.usd;
-    const priceChange24h = data.market_data.price_change_percentage_24h;
-    console.log(high24h, low24h, current, priceChange24h);
-    return { high24h, low24h, current, priceChange24h };
-  } catch (err) {
-    console.error("Fetch 24h stats failed:", err.message);
-    return { high24h: 0, low24h: 0, current: 0, priceChange24h: 0 };
-  }
+  return { ema50, ema200, rsi };
 }
 
 // --- POSITION SIZE ---
 function calculatePositionSize(entryPrice) {
   const riskAmount = (RISK_PERCENT / 100) * CAPITAL;
   const stopLossPrice = entryPrice * (1 - STOP_LOSS_PERCENT / 100);
-  const riskPerUnit = entryPrice - stopLossPrice;
-  const positionSize = riskAmount / riskPerUnit;
-  const takeProfitPrice = entryPrice + riskPerUnit * REWARD_RISK_RATIO;
-
+  const takeProfitPrice = entryPrice * (1 + TAKE_PROFIT_PERCENT / 100);
+  const positionSize = riskAmount / (entryPrice - stopLossPrice);
   return { positionSize, stopLossPrice, takeProfitPrice };
 }
 
-// --- SEND TELEGRAM MESSAGE ---
+// --- TELEGRAM MESSAGE ---
 async function sendTelegramMessage(msg) {
   try {
     await bot.telegram.sendMessage(CHAT_ID, msg);
-    console.log("Telegram message sent:", msg);
-  } catch (e) {
-    console.error("Telegram send error:", e.message);
+    console.log("📩 Sent:", msg.split("\n")[0]);
+  } catch (err) {
+    console.error("❌ Telegram send failed:", err.message);
   }
 }
 
-// --- MAIN ANALYZE FUNCTION ---
-async function analyze() {
-  console.log("Analyzing market data...");
+// --- ANALYZE FUNCTION ---
+async function analyze(symbol, source = "binance") {
+  const candles =
+    source === "binance"
+      ? await fetchBinanceCandles(symbol)
+      : await fetchTwelveCandles(symbol);
 
-  const candles = await fetchCandles();
-  console.log("Fetched candles:", candles.length);
-
-  if (candles.length === 0) {
-    console.log("No candle data, skipping analyze...");
-    return;
-  }
+  if (candles.length < 200) return;
 
   const closes = candles.map((c) => c.close);
-  if (closes.length < 20) {
-    console.log("Not enough data for indicators.");
-    return;
+  const { ema50, ema200, rsi } = calculateIndicators(closes);
+
+  const current = closes.at(-1);
+  const lastEMA50 = ema50.at(-1);
+  const lastEMA200 = ema200.at(-1);
+  const currentRSI = rsi.at(-1);
+
+  const key = `${source}:${symbol}`;
+  const lastRSI = lastRSIValues[key] ?? null;
+
+  // --- RSI Update
+  if (lastRSI !== null && currentRSI !== lastRSI) {
+    const diff = (currentRSI - lastRSI).toFixed(2);
+    const arrow = diff > 0 ? "↗" : "↘";
+    await sendTelegramMessage(
+      `📊 [${symbol}] RSI: ${currentRSI.toFixed(2)} (${arrow} ${Math.abs(
+        diff
+      )})`
+    );
+
+    if (currentRSI > 60)
+      await sendTelegramMessage(
+        `⚠️ [${symbol}] RSI Overbought (${currentRSI.toFixed(2)})`
+      );
+    if (currentRSI < 42)
+      await sendTelegramMessage(
+        `⚠️ [${symbol}] RSI Oversold (${currentRSI.toFixed(2)})`
+      );
   }
+  lastRSIValues[key] = currentRSI;
 
-  const { emaShort, emaLong, rsi } = calculateIndicators(closes);
-  const current = closes[closes.length - 1];
-  const emaShortNow = emaShort[emaShort.length - 1];
-  const emaLongNow = emaLong[emaLong.length - 1];
-  const rsiNow = rsi[rsi.length - 1];
-
-  const { high24h, low24h } = await fetch24hStats();
-
-  const uptrend = emaShortNow > emaLongNow;
-
-  if (!position) {
-    if (uptrend && rsiNow < 70 && current > emaShortNow) {
+  // --- Trade logic
+  if (!positions[key]) {
+    if (lastEMA50 > lastEMA200 && currentRSI > 50) {
       const { positionSize, stopLossPrice, takeProfitPrice } =
         calculatePositionSize(current);
-      position = {
-        entryPrice: current,
-        positionSize,
-        stopLossPrice,
-        takeProfitPrice,
-      };
-      const msg = `🚀 BUY SIGNAL
+      positions[key] = { stopLossPrice, takeProfitPrice };
+
+      const msg = `🚀 [${symbol}] BUY SIGNAL
 Price: $${current.toFixed(2)}
-RSI: ${rsiNow.toFixed(2)}
-24h High: $${high24h}
-24h Low: $${low24h}
-Position size: ${positionSize.toFixed(6)} BTC
-Stop Loss: $${stopLossPrice.toFixed(2)}
-Take Profit: $${takeProfitPrice.toFixed(2)}`;
+RSI: ${currentRSI.toFixed(2)}
+Position Size: ${positionSize.toFixed(6)} units
+SL: $${stopLossPrice.toFixed(2)}
+TP: $${takeProfitPrice.toFixed(2)}`;
       await sendTelegramMessage(msg);
-    } else {
-      console.log(
-        `No buy signal. RSI: ${rsiNow.toFixed(2)} | Price: $${current.toFixed(
-          2
-        )} | EMA10: ${emaShortNow.toFixed(2)} | EMA20: ${emaLongNow.toFixed(2)}`
-      );
     }
   } else {
-    const { stopLossPrice, takeProfitPrice } = position;
+    const { stopLossPrice, takeProfitPrice } = positions[key];
     if (current >= takeProfitPrice) {
       await sendTelegramMessage(
-        `🎉 TAKE PROFIT HIT\nPrice: $${current.toFixed(2)}`
+        `🎉 [${symbol}] TAKE PROFIT HIT @ $${current.toFixed(2)}`
       );
-      position = null;
+      positions[key] = null;
     } else if (current <= stopLossPrice) {
       await sendTelegramMessage(
-        `⚠️ STOP LOSS HIT\nPrice: $${current.toFixed(2)}`
+        `❌ [${symbol}] STOP LOSS HIT @ $${current.toFixed(2)}`
       );
-      position = null;
+      positions[key] = null;
     }
   }
 }
 
-// --- RUN BOT EVERY MINUTE ---
-setInterval(analyze, 60 * 1000);
-console.log("📈 Bot started using CoinGecko hourly API...");
+// --- MAIN LOOP ---
+setInterval(() => analyze("BTCUSDT"), 60 * 1000);
+setInterval(() => analyze("ETHUSDT"), 60 * 1000);
+
+// XAU pairs (reduce frequency to save API)
+setInterval(() => analyze("XAUUSD"), 15 * 60 * 1000); // every 15 minutes
+setInterval(() => analyze("XAUEUR"), 15 * 60 * 1000);
+setInterval(() => analyze("XAUAUD"), 15 * 60 * 1000);
+setInterval(() => analyze("XAUGBP"), 15 * 60 * 1000);
+
+console.log("🤖 Bot started... Crypto every 1min, XAU pairs every 15min...");
