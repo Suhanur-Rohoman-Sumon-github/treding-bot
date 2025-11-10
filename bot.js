@@ -15,10 +15,6 @@ const bot = new Telegraf(BOT_TOKEN);
 let positions = {};
 let lastRSIValues = {};
 
-// Split pairs into two categories
-const cryptoSymbols = ["BTCUSDT", "ETHUSDT"];
-const goldSymbols = ["XAU/USD", "XAU/EUR", "XAU/GBP", "XAU/AUD"];
-
 // --- BOT CONNECT ---
 (async () => {
   try {
@@ -177,13 +173,13 @@ TP: $${takeProfitPrice.toFixed(2)}`;
 }
 
 // --- MAIN LOOP ---
-setInterval(() => analyze("BTCUSDT"), 60 * 1000);
-setInterval(() => analyze("ETHUSDT"), 60 * 1000);
+// Only BTCUSDT and Gold pairs now
+setInterval(() => analyze("BTCUSDT"), 5 * 60 * 1000);
 
-// XAU pairs (reduce frequency to save API)
-setInterval(() => analyze("XAUUSD"), 15 * 60 * 1000); // every 15 minutes
+// XAU pairs (every 15 minutes)
+setInterval(() => analyze("XAUUSD"), 15 * 60 * 1000);
 setInterval(() => analyze("XAUEUR"), 15 * 60 * 1000);
 setInterval(() => analyze("XAUAUD"), 15 * 60 * 1000);
 setInterval(() => analyze("XAUGBP"), 15 * 60 * 1000);
 
-console.log("🤖 Bot started... Crypto every 1min, XAU pairs every 15min...");
+console.log("🤖 Bot started... BTC every 5min, XAU pairs every 15min...");
