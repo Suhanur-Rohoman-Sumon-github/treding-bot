@@ -11,6 +11,9 @@ const BOT_TOKEN = "8469977295:AAHZWhpCEzjOa2oO01snLZA7pJ5962dOS8A";
 const CHAT_ID = 6960930765;
 const API_KEY = "d6d3d69587d74a969c948d302fe214f2";
 
+// ==========================
+// INIT
+// ==========================
 const bot = new Telegraf(BOT_TOKEN);
 let positions = {};
 let lastRSIValues = {};
@@ -30,7 +33,7 @@ async function send(msg) {
 // ==========================
 // FETCH CANDLES (BINANCE)
 // ==========================
-async function fetchBinance(symbol, interval = "5m", limit = 300) {
+async function fetchBinance(symbol, interval = "4h", limit = 300) {
   try {
     const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
     const r = await fetch(url);
@@ -39,36 +42,34 @@ async function fetchBinance(symbol, interval = "5m", limit = 300) {
 
     return json.map((c) => ({ time: c[0], close: parseFloat(c[4]) }));
   } catch (err) {
+    console.log("Binance fetch error:", err.message);
     return [];
   }
 }
 
 // ==========================
-// FETCH FOREX CANDLES
+// FETCH FOREX CANDLES (Massive API)
 // ==========================
-
-// Fetch time series data for Forex or Crypto
-async function fetchTwelveData(symbol) {
+async function fetchForex(pair) {
   try {
-    const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=5min&apikey=${API_KEY}&format=json&outputsize=100`;
+    // Twelve Data expects symbol format like "EUR/USD"
+    const symbol = pair.slice(0, 3) + "/" + pair.slice(3);
+
+    const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=1day&outputsize=200&apikey=${API_KEY}`;
+
     const { data } = await axios.get(url);
 
-    if (data.status === "error") {
-      console.error("❌ Twelve Data API error:", data.message);
-      return null;
+    if (!data || !data.values) {
+      console.log(`[DEBUG] Twelve Data returned no data for ${pair}`);
+      return [];
     }
 
-    // data.values is an array of candles, newest first
-    const closes = data.values
-      .map((candle) => parseFloat(candle.close))
-      .reverse();
-
-    const latestPrice = closes[closes.length - 1];
-
-    return { closes, latestPrice };
+    // Twelve Data returns array newest first, so reverse it for oldest first
+    const closes = data.values.reverse().map((v) => parseFloat(v.close));
+    return closes;
   } catch (err) {
-    console.error("❌ Twelve Data fetch error:", err.message);
-    return null;
+    console.log("Forex fetch error:", err.message);
+    return [];
   }
 }
 
@@ -77,31 +78,34 @@ async function fetchTwelveData(symbol) {
 // ==========================
 function getIndicators(closes) {
   return {
-    ema50: EMA.calculate({ period: 10, values: closes }).pop(),
-    ema200: EMA.calculate({ period: 20, values: closes }).pop(),
+    ema50: EMA.calculate({ period: 50, values: closes }).pop(),
+    ema200: EMA.calculate({ period: 200, values: closes }).pop(),
     rsi: RSI.calculate({ period: 14, values: closes }).pop(),
   };
 }
 
 // ==========================
-// MASTER ANALYZE FUNCTION
+// ANALYZE MARKET
 // ==========================
 async function analyzeMarket(symbol, type = "forex") {
-  let data = await fetchTwelveData(symbol);
-  if (!data) {
-    console.log(`[DEBUG] No data for ${symbol}`);
-    return null;
+  let closes;
+
+  if (type === "binance") {
+    closes = (await fetchBinance(symbol)).map((c) => c.close);
+  } else {
+    closes = await fetchForex(symbol);
+    console.log(`[DEBUG] Forex closes for ${symbol}: length=${closes?.length}`);
   }
 
-  const closes = data.closes;
-
   if (!closes || closes.length < 30) {
-    console.log(`[DEBUG] Not enough data for ${symbol}: ${closes.length}`);
+    console.log(
+      `[DEBUG] Not enough data for ${symbol}: ${closes?.length || 0} bars`
+    );
     return null;
   }
 
   const { ema50, ema200, rsi } = getIndicators(closes);
-  const last = data.latestPrice;
+  const last = closes.at(-1);
 
   lastRSIValues[symbol] = rsi;
 
@@ -109,47 +113,39 @@ async function analyzeMarket(symbol, type = "forex") {
 }
 
 // ==========================
-// FOREX LIST
+// FOREX PAIRS
 // ==========================
 const FOREX = [
-  "EUR/USD",
-  "GBP/USD",
-  "AUD/USD",
-  "NZD/USD",
-  "USD/JPY",
-  "USD/CHF",
-  "USD/CAD",
+  "EURUSD",
+  "GBPUSD",
+  "AUDUSD",
+  "NZDUSD",
+  "USDJPY",
+  "USDCHF",
+  "USDCAD",
+  "XAUUSD",
 ];
 
-const BTC_SYMBOL = "BTC/USDT"; // Twelve Data format
-
 // ==========================
-// SCHEDULERS
+// SCHEDULER
 // ==========================
-
-// --- Forex RSI every 5 min
-cron.schedule("*/5 * * * *", async () => {
+cron.schedule("*/30 * * * *", async () => {
   console.log("🔄 Checking all RSI values...");
 
   const forexResults = await Promise.all(
     FOREX.map((pair) => analyzeMarket(pair, "forex"))
   );
-
-  const btcResult = await analyzeMarket(BTC_SYMBOL, "binance");
+  const btcResult = await analyzeMarket("BTCUSDT", "binance");
 
   const allResults = [...forexResults.filter(Boolean), btcResult].filter(
     Boolean
   );
 
-  // Build one big message with RSI info + current price
   let message = `📊 RSI Update — ${new Date().toLocaleString()}\n\n`;
-  allResults.forEach(({ symbol, rsi, last }) => {
-    message += `${symbol}: Price = ${last.toFixed(5)}, RSI = ${rsi.toFixed(
-      2
-    )}\n`;
+  allResults.forEach(({ symbol, rsi }) => {
+    message += `${symbol}: ${rsi.toFixed(2)}\n`;
   });
 
-  // Add overbought/oversold alerts
   allResults.forEach(({ symbol, rsi }) => {
     if (rsi > 65)
       message += `⚠️ ${symbol} RSI Overbought (${rsi.toFixed(2)})\n`;
@@ -158,7 +154,7 @@ cron.schedule("*/5 * * * *", async () => {
 
   await send(message);
 
-  // Optional: EMA trade signals for Binance pairs, sent separately
+  // EMA trade signals for Binance pairs
   for (const res of allResults) {
     if (res.type === "binance") {
       const { symbol, ema50, ema200, rsi, last } = res;
