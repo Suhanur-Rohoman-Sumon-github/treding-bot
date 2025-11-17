@@ -30,7 +30,7 @@ async function send(msg) {
 // ==========================
 // FETCH CANDLES (BINANCE)
 // ==========================
-async function fetchBinance(symbol, interval = "15m", limit = 300) {
+async function fetchBinance(symbol, interval = "5m", limit = 300) {
   try {
     const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
     const r = await fetch(url);
@@ -46,18 +46,29 @@ async function fetchBinance(symbol, interval = "15m", limit = 300) {
 // ==========================
 // FETCH FOREX CANDLES
 // ==========================
-async function fetchForex(pair) {
-  try {
-    const base = pair.slice(0, 3);
-    const quote = pair.slice(3);
 
-    const url = `https://api.exchangerate.host/timeseries?base=${base}&symbols=${quote}&start_date=2024-10-01&end_date=2024-12-31`;
+// Fetch time series data for Forex or Crypto
+async function fetchTwelveData(symbol) {
+  try {
+    const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=5min&apikey=${API_KEY}&format=json&outputsize=100`;
     const { data } = await axios.get(url);
 
-    const closes = Object.values(data.rates).map((r) => r[quote]);
-    return closes.slice(-200);
+    if (data.status === "error") {
+      console.error("❌ Twelve Data API error:", data.message);
+      return null;
+    }
+
+    // data.values is an array of candles, newest first
+    const closes = data.values
+      .map((candle) => parseFloat(candle.close))
+      .reverse();
+
+    const latestPrice = closes[closes.length - 1];
+
+    return { closes, latestPrice };
   } catch (err) {
-    return [];
+    console.error("❌ Twelve Data fetch error:", err.message);
+    return null;
   }
 }
 
@@ -66,8 +77,8 @@ async function fetchForex(pair) {
 // ==========================
 function getIndicators(closes) {
   return {
-    ema50: EMA.calculate({ period: 50, values: closes }).pop(),
-    ema200: EMA.calculate({ period: 200, values: closes }).pop(),
+    ema50: EMA.calculate({ period: 10, values: closes }).pop(),
+    ema200: EMA.calculate({ period: 20, values: closes }).pop(),
     rsi: RSI.calculate({ period: 14, values: closes }).pop(),
   };
 }
@@ -76,65 +87,41 @@ function getIndicators(closes) {
 // MASTER ANALYZE FUNCTION
 // ==========================
 async function analyzeMarket(symbol, type = "forex") {
-  let closes;
+  let data = await fetchTwelveData(symbol);
+  if (!data) {
+    console.log(`[DEBUG] No data for ${symbol}`);
+    return null;
+  }
 
-  if (type === "binance")
-    closes = (await fetchBinance(symbol)).map((c) => c.close);
-  else closes = await fetchForex(symbol);
+  const closes = data.closes;
 
-  if (!closes || closes.length < 200) return;
+  if (!closes || closes.length < 30) {
+    console.log(`[DEBUG] Not enough data for ${symbol}: ${closes.length}`);
+    return null;
+  }
 
   const { ema50, ema200, rsi } = getIndicators(closes);
-  const last = closes.at(-1);
+  const last = data.latestPrice;
 
-  const key = `${symbol}`;
-  const prevRSI = lastRSIValues[key] ?? null;
+  lastRSIValues[symbol] = rsi;
 
-  // RSI Update Message
-  if (prevRSI !== null && prevRSI !== rsi) {
-    const diff = (rsi - prevRSI).toFixed(2);
-    const arrow = diff > 0 ? "↗" : "↘";
-
-    await send(
-      `📊 [${symbol}] RSI: ${rsi.toFixed(2)} (${arrow} ${Math.abs(diff)})`
-    );
-  }
-  lastRSIValues[key] = rsi;
-
-  // Extra RSI Alerts
-  if (rsi > 65) await send(`⚠️ [${symbol}] RSI Overbought (${rsi.toFixed(2)})`);
-  if (rsi < 35) await send(`⚠️ [${symbol}] RSI Oversold (${rsi.toFixed(2)})`);
-
-  // EMA Trade Logic (Only for Binance assets)
-  if (type === "binance") {
-    if (!positions[key]) {
-      if (ema50 > ema200 && rsi > 50) {
-        positions[key] = true;
-        await send(
-          `🚀 BUY SIGNAL [${symbol}]\nPrice: ${last}\nRSI: ${rsi.toFixed(2)}`
-        );
-      }
-    } else {
-      if (ema50 < ema200 || rsi < 45) {
-        positions[key] = null;
-        await send(`📉 SELL EXIT [${symbol}]\nPrice: ${last}`);
-      }
-    }
-  }
+  return { symbol, rsi, ema50, ema200, last, type };
 }
 
 // ==========================
 // FOREX LIST
 // ==========================
 const FOREX = [
-  "EURUSD",
-  "GBPUSD",
-  "AUDUSD",
-  "NZDUSD",
-  "USDJPY",
-  "USDCHF",
-  "USDCAD",
+  "EUR/USD",
+  "GBP/USD",
+  "AUD/USD",
+  "NZD/USD",
+  "USD/JPY",
+  "USD/CHF",
+  "USD/CAD",
 ];
+
+const BTC_SYMBOL = "BTC/USDT"; // Twelve Data format
 
 // ==========================
 // SCHEDULERS
@@ -142,18 +129,55 @@ const FOREX = [
 
 // --- Forex RSI every 5 min
 cron.schedule("*/5 * * * *", async () => {
-  console.log("🔄 Checking Forex RSI...");
-  for (const pair of FOREX) await analyzeMarket(pair, "forex");
+  console.log("🔄 Checking all RSI values...");
+
+  const forexResults = await Promise.all(
+    FOREX.map((pair) => analyzeMarket(pair, "forex"))
+  );
+
+  const btcResult = await analyzeMarket(BTC_SYMBOL, "binance");
+
+  const allResults = [...forexResults.filter(Boolean), btcResult].filter(
+    Boolean
+  );
+
+  // Build one big message with RSI info + current price
+  let message = `📊 RSI Update — ${new Date().toLocaleString()}\n\n`;
+  allResults.forEach(({ symbol, rsi, last }) => {
+    message += `${symbol}: Price = ${last.toFixed(5)}, RSI = ${rsi.toFixed(
+      2
+    )}\n`;
+  });
+
+  // Add overbought/oversold alerts
+  allResults.forEach(({ symbol, rsi }) => {
+    if (rsi > 65)
+      message += `⚠️ ${symbol} RSI Overbought (${rsi.toFixed(2)})\n`;
+    if (rsi < 35) message += `⚠️ ${symbol} RSI Oversold (${rsi.toFixed(2)})\n`;
+  });
+
+  await send(message);
+
+  // Optional: EMA trade signals for Binance pairs, sent separately
+  for (const res of allResults) {
+    if (res.type === "binance") {
+      const { symbol, ema50, ema200, rsi, last } = res;
+      if (!positions[symbol]) {
+        if (ema50 > ema200 && rsi > 50) {
+          positions[symbol] = true;
+          await send(
+            `🚀 BUY SIGNAL [${symbol}]\nPrice: ${last}\nRSI: ${rsi.toFixed(2)}`
+          );
+        }
+      } else {
+        if (ema50 < ema200 || rsi < 45) {
+          positions[symbol] = null;
+          await send(`📉 SELL EXIT [${symbol}]\nPrice: ${last}`);
+        }
+      }
+    }
+  }
 });
-
-// --- BTC every 5 min
-setInterval(() => analyzeMarket("BTCUSDT", "binance"), 5 * 60 * 1000);
-
-// --- XAU Every 15 min
-setInterval(() => analyzeMarket("XAUUSD", "forex"), 15 * 60 * 1000);
-setInterval(() => analyzeMarket("XAUEUR", "forex"), 15 * 60 * 1000);
-setInterval(() => analyzeMarket("XAUAUD", "forex"), 15 * 60 * 1000);
-setInterval(() => analyzeMarket("XAUGBP", "forex"), 15 * 60 * 1000);
 
 // ==========================
 // STARTUP MESSAGE
